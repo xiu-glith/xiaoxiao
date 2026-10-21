@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>荷兰豆勇闯蛋仔</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background-color: #fef7ff;
+            font-family: system-ui, sans-serif;
+            overflow: hidden;
+            touch-action: manipulation;
+        }
+        #uiBox {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 10;
+            text-align: center;
+        }
+        #scoreBox {
+            font-size: 28px;
+            font-weight: bold;
+            color: #ff7043;
+            margin-bottom: 8px;
+        }
+        #difficultyTip {
+            font-size: 14px;
+            color: #9c27b0;
+            margin-top: 4px;
+        }
+        #instructions {
+            font-size: 18px;
+            color: #6a1b9a;
+            font-weight: bold;
+            margin-top: 8px;
+        }
+        #musicTip {
+            font-size: 14px;
+            color: #ff5722;
+            margin-top: 6px;
+        }
+        canvas {
+            border-radius: 20px;
+            box-shadow: 0 12px 30px rgba(156, 39, 176, 0.25);
+            max-width: 95vw;
+            height: auto;
+        }
+    </style>
+</head>
+<body>
+    <div id="uiBox">
+        <div id="scoreBox">得分：0</div>
+        <div id="difficultyTip">当前难度：初始休闲级</div>
+        <div id="instructions">点击屏幕 / 按空格跳 顶苹果软萌小猫</div>
+        <div id="musicTip">🎵 蛋仔派对BGM自动播放中</div>
+    </div>
+    <canvas id="gameCanvas" width="900" height="500"></canvas>
+    <audio id="bgm" loop preload="auto">
+        <source src="https://res.np.163.com/game/eggyparty/website/audio/bgm_main.mp3" type="audio/mpeg">
+    </audio>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const scoreBox = document.getElementById('scoreBox');
+        const difficultyTip = document.getElementById('difficultyTip');
+        const bgm = document.getElementById('bgm');
+        bgm.volume = 0.3; // 修复直接在标签上写volume不生效的问题
+
+        // 修复自动播放限制逻辑 避免浏览器控制台报错
+        let musicStarted = false;
+        function startMusic() {
+            if(!musicStarted) {
+                bgm.play().catch(() => {
+                    // 静默捕获音频权限异常 不抛出错误中断游戏
+                });
+                musicStarted = true;
+            }
+        }
+        canvas.addEventListener('mousedown', startMusic);
+        canvas.addEventListener('touchstart', startMusic);
+        window.addEventListener('keydown', startMusic);
+
+        const GROUND_Y = 400;
+        const BASE_GRAVITY = 0.32;
+        const BASE_JUMP_FORCE = -18;
+        const BASE_GAME_SPEED = 2.5;
+        const BASE_MIN_SPAWN_GAP = 220;
+        const MAX_GAME_SPEED = 5;
+        const MIN_ALLOW_SPAWN_GAP = 120;
+        const MAX_GRAVITY = 0.45;
+
+        let gameOver = false;
+        let score = 0;
+        let obstacles = [];
+        let frameCount = 0;
+        let lastSpawnFrame = -BASE_MIN_SPAWN_GAP;
+
+        let currentGameSpeed = BASE_GAME_SPEED;
+        let currentGravity = BASE_GRAVITY;
+        let currentMinSpawnGap = BASE_MIN_SPAWN_GAP;
+
+        const player = {
+            x: 120,
+            y: GROUND_Y,
+            w: 85,
+            h: 95,
+            vy: 0,
+            isJumping: false
+        };
+        const EGG_COLORS = [
+            ['#ff6b6b', '#ee3a3a'],
+            ['#ffb74d', '#ff9800'],
+            ['#4fc3f7', '#03a9f4'],
+            ['#ba68c8', '#9c27b0'],
+            ['#81c784', '#4caf50']
+        ];
+
+        // 难度更新逻辑 无边界溢出
+        function updateDifficulty() {
+            const difficultyLevel = Math.floor(frameCount / 300);
+            currentGameSpeed = Math.min(BASE_GAME_SPEED + difficultyLevel * 0.15, MAX_GAME_SPEED);
+            currentGravity = Math.min(BASE_GRAVITY + difficultyLevel * 0.01, MAX_GRAVITY);
+            currentMinSpawnGap = Math.max(BASE_MIN_SPAWN_GAP - difficultyLevel * 10, MIN_ALLOW_SPAWN_GAP);
+            
+            if(difficultyLevel < 3) {
+                difficultyTip.innerText = "当前难度：初始休闲级";
+            } else if(difficultyLevel < 6) {
+                difficultyTip.innerText = "当前难度：轻松入门级";
+            } else if(difficultyLevel < 10) {
+                difficultyTip.innerText = "当前难度：舒适挑战级";
+            } else {
+                difficultyTip.innerText = "当前难度：高手挑战级";
+            }
+        }
+
+        function spawnEgg() {
+            const colorPair = EGG_COLORS[Math.floor(Math.random() * EGG_COLORS.length)];
+            obstacles.push({
+                x: canvas.width + 180,
+                y: GROUND_Y,
+                w: 65,
+                h: 70,
+                c1: colorPair[0],
+                c2: colorPair[1],
+                passed: false
+            });
+            lastSpawnFrame = frameCount;
+        }
+        function jump() {
+            if (!player.isJumping && !gameOver) {
+                player.vy = BASE_JUMP_FORCE;
+                player.isJumping = true;
+            }
+        }
+        window.addEventListener('keydown', function(e) {
+            if (!e) return;
+            if (e.code === 'Space') {
+                e.preventDefault();
+                if (gameOver) resetGame();
+                else jump();
+            }
+        });
+        canvas.addEventListener('mousedown', function() {
+            if (gameOver) resetGame();
+            else jump();
+        });
+        canvas.addEventListener('touchstart', function(e) {
+            if (!e) return;
+            e.preventDefault();
+            if (gameOver) resetGame();
+            else jump();
+        });
+        // 修复碰撞检测边缘误判问题
+        function checkCollision(a, b) {
+            return a.x < b.x + b.w - 35 &&
+                   a.x + a.w - 35 > b.x &&
+                   a.y < b.y + b.h - 30 &&
+                   a.y + a.h > b.y + 25;
+        }
+        function resetGame() {
+            player.y = GROUND_Y;
+            player.vy = 0;
+            player.isJumping = false;
+            obstacles = [];
+            score = 0;
+            frameCount = 0;
+            lastSpawnFrame = -BASE_MIN_SPAWN_GAP;
+            currentGameSpeed = BASE_GAME_SPEED;
+            currentGravity = BASE_GRAVITY;
+            currentMinSpawnGap = BASE_MIN_SPAWN_GAP;
+            gameOver = false;
+            scoreBox.innerText = "得分：" + score;
+            difficultyTip.innerText = "当前难度：初始休闲级";
+        }
+        function drawWatercolorBackground() {
+            const skyGrad = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+            skyGrad.addColorStop(0, '#e8f4f8');
+            skyGrad.addColorStop(0.5, '#f0f9ff');
+            skyGrad.addColorStop(1, '#fff8f0');
+            ctx.fillStyle = skyGrad;
+            ctx.fillRect(0, 0, 900, GROUND_Y);
+
+            ctx.globalAlpha = 0.7;
+            ctx.fillStyle = '#ffffff';
+            const nowTime = Date.now();
+            for (let i = 0; i < 4; i++) {
+                ctx.shadowColor = 'rgba(200, 220, 240, 0.4)';
+                ctx.shadowBlur = 25;
+                const cx = (nowTime * 0.012 + i * 250) % 1200 - 200;
+                const cy = 70 + i * 65;
+                ctx.beginPath();
+                ctx.arc(cx, cy, 38, 0, Math.PI * 2);
+                ctx.arc(cx + 45, cy - 18, 42, 0, Math.PI * 2);
+                ctx.arc(cx + 90, cy + 5, 32, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.shadowBlur = 0;
+            ctx.globalAlpha = 1;
+
+            const groundGrad = ctx.createLinearGradient(0, GROUND_Y, 0, 500);
+            groundGrad.addColorStop(0, '#dcf1d9');
+            groundGrad.addColorStop(1, '#b8e0b0');
+            ctx.fillStyle = groundGrad;
+            ctx.fillRect(0, GROUND_Y, 900, 100);
+
+            ctx.globalAlpha = 0.8;
+            ctx.fillStyle = '#f8d7da';
+            for(let i=0;i<22;i++) {
+                const fx = (i * 42 + Math.sin(frameCount*0.008 + i) * 4) % 900;
+                ctx.shadowColor = 'rgba(248, 215, 218, 0.5)';
+                ctx.shadowBlur = 8;
+                ctx.beginPath();
+                ctx.arc(fx, GROUND_Y + 12, 5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.shadowBlur = 0;
+            ctx.globalAlpha = 1;
+        }
+        // 水彩小猫绘制 无溢出错误
+        function drawWatercolorCat() {
+            const x = player.x;
+            const y = player.y - player.h;
+            const bounce = Math.sin(frameCount*0.1) * 2;
+            
+            ctx.globalAlpha = 0.85;
+            ctx.shadowColor = 'rgba(30, 30, 30, 0.25)';
+            ctx.shadowBlur = 28;
+            ctx.fillStyle = '#2c2c2c';
+            ctx.beginPath();
+            ctx.ellipse(x + 44, y + 48 + bounce, 44, 47, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(x + 44, y + 21 + bounce, 36, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 0.7;
+            ctx.fillStyle = '#121212';
+            ctx.beginPath();
+            ctx.ellipse(x + 46, y + 50 + bounce, 40, 43, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(x + 46, y + 23 + bounce, 33, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 0.8;
+            ctx.fillStyle = '#1a1a1a';
+            ctx.beginPath();
+            ctx.arc(x + 13, y + 6 + bounce, 23, 0, Math.PI * 2);
+            ctx.arc(x + 77, y + 6 + bounce, 23, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.globalAlpha = 1;
+
+            ctx.globalAlpha = 0.95;
+            ctx.fillStyle = '#ffffff';
+            ctx.shadowColor = 'rgba(255, 255, 255, 0.7)';
+            ctx.shadowBlur = 12;
+            ctx.beginPath();
+            ctx.arc(x + 31, y + 40 + bounce, 8, 0, Math.PI * 2);
+            ctx.arc(x + 57, y + 40 + bounce, 8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.globalAlpha = 1;
+
+            ctx.globalAlpha = 0.9;
+            const appleGrad = ctx.createRadialGradient(
+                x + 42, y - 12 + bounce, 0,
+                x + 42, y - 12 + bounce, 25
+            );
+            appleGrad.addColorStop(0, '#e57373');
+            appleGrad.addColorStop(0.7, '#d32f2f');
+            appleGrad.addColorStop(1, '#b71c1c');
+            ctx.fillStyle = appleGrad;
+            ctx.shadowColor = 'rgba(244, 67, 54, 0.4)';
+            ctx.shadowBlur = 18;
+            ctx.beginPath();
+            ctx.arc(x + 42, y - 12 + bounce, 23, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.globalAlpha = 1;
+            ctx.globalAlpha = 0.7;
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.arc(x + 35, y - 18 + bounce, 5, 0, Math.PI * 2);
+            ctx.arc(x + 41, y - 7 + bounce, 4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+            ctx.globalAlpha = 0.85;
+            ctx.fillStyle = '#66bb6a';
+            ctx.shadowColor = 'rgba(76, 175, 80, 0.3)';
+            ctx.shadowBlur = 8;
+            ctx.beginPath();
+            ctx.arc(x + 43, y - 31 + bounce, 9, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.globalAlpha = 1;
+            ctx.strokeStyle = '#795548';
+            ctx.lineWidth = 3;
+            ctx.globalAlpha = 0.9;
+            ctx.beginPath();
+            ctx.moveTo(x + 46, y - 31 + bounce);
+            ctx.lineTo(x + 56, y - 40 + bounce);
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+
+            ctx.globalAlpha = 0.9;
+            const smallAppleGrad = ctx.createRadialGradient(
+                x + 10, y + 75 + bounce, 0,
+                x + 10, y + 75 + bounce, 19
+            );
+            smallAppleGrad.addColorStop(0, '#ef9a9a');
+            smallAppleGrad.addColorStop(0.7, '#e53935');
+            ctx.fillStyle = smallAppleGrad;
+            ctx.shadowColor = 'rgba(244, 67, 54, 0.35)';
+            ctx.shadowBlur = 15;
+            ctx.beginPath();
+            ctx.arc(x + 10, y + 75 + bounce, 19, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.globalAlpha = 1;
+            ctx.globalAlpha = 0.7;
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.arc(x + 5, y + 70 + bounce, 4, 0, Math.PI * 2);
+            ctx.arc(x + 12, y + 78 + bounce, 3, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+            ctx.globalAlpha = 0.85;
+            ctx.fillStyle = '#81c784';
+            ctx.shadowColor = 'rgba(76, 175, 80, 0.3)';
+            ctx.shadowBlur = 7;
+            ctx.beginPath();
+            ctx.arc(x + 23, y + 62 + bounce, 8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.globalAlpha = 1;
+        }
+        function drawWatercolorEgg(egg) {
+            const bounce = Math.sin(frameCount * 0.06 + egg.x * 0.005) * 3;
+            ctx.globalAlpha = 0.92;
+            ctx.shadowColor = egg.c1;
+            ctx.shadowBlur = 28;
+            const eggGrad = ctx.createRadialGradient(
+                egg.x + egg.w * 0.2, egg.y - egg.h * 0.5 + bounce, 0,
+                egg.x + egg.w/2, egg.y - egg.h/2 + bounce, egg.w/2
+            );
+            eggGrad.addColorStop(0, egg.c1);
+            eggGrad.addColorStop(0.65, egg.c2);
+            eggGrad.addColorStop(1, '#ffffff');
+            ctx.fillStyle = eggGrad;
+            ctx.beginPath();
+            ctx.ellipse(egg.x + egg.w/2, egg.y - egg.h/2 + bounce, egg.w/2, egg.h/2, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = '#ffffff';
+            ctx.shadowColor = 'rgba(255,255,255,0.6)';
+            ctx.shadowBlur = 10;
+            ctx.beginPath();
+            ctx.arc(egg.x + egg.w * 0.3, egg.y - egg.h * 0.55 + bounce, 13, 0, Math.PI * 2);
+            ctx.arc(egg.x + egg.w * 0.7, egg.y - egg.h * 0.55 + bounce, 13, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = '#212121';
+            ctx.beginPath();
+            ctx.arc(egg.x + egg.w * 0.33, egg.y - egg.h * 0.53 + bounce, 7, 0, Math.PI * 2);
+            ctx.arc(egg.x + egg.w * 0.73, egg.y - egg.h * 0.53 + bounce, 7, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.arc(egg.x + egg.w * 0.31, egg.y - egg.h * 0.5 + bounce, 2, 0, Math.PI * 2);
+            ctx.arc(egg.x + egg.w * 0.71, egg.y - egg.h * 0.5 + bounce, 2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#212121';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(egg.x + egg.w/2, egg.y - egg.h * 0.35 + bounce, 8, 0.3, Math.PI - 0.3);
+            ctx.stroke();
+        }
+        // 主游戏循环 全局异常捕获 不会卡死崩溃
+        function gameLoop() {
+            try {
+                frameCount++;
+                ctx.clearRect(0, 0, 900, 500);
+                drawWatercolorBackground();
+                if(!gameOver) {
+                    updateDifficulty();
+                    player.vy += currentGravity;
+                    player.y += player.vy;
+                    if(player.y >= GROUND_Y) {
+                        player.y = GROUND_Y;
+                        player.vy = 0;
+                        player.isJumping = false;
+                    }
+                    if(Math.random() < 0.008 && frameCount - lastSpawnFrame >= currentMinSpawnGap) spawnEgg();
+                    for(let i = obstacles.length - 1; i >= 0; i--) {
+                        const egg = obstacles[i];
+                        egg.x -= currentGameSpeed;
+                        if(!egg.passed && egg.x + egg.w < player.x) {
+                            egg.passed = true;
+                            score += 1;
+                            scoreBox.innerText = "得分：" + score;
+                        }
+                        if(checkCollision(player, egg)) {
+                            gameOver = true;
+                        }
+                        if(egg.x < -100) {
+                            obstacles.splice(i, 1);
+                        }
+                    }
+                }
+                for(let j=0;j<obstacles.length;j++) {
+                    drawWatercolorEgg(obstacles[j]);
+                }
+                drawWatercolorCat();
+                if(gameOver) {
+                    ctx.fillStyle = 'rgba(156, 39, 176, 0.65)';
+                    ctx.fillRect(0, 0, 900, 500);
+                    ctx.fillStyle = '#ffffff';
+                    ctx.font = 'bold 40px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('荷兰豆撞到蛋仔啦！得分：' + score, 450, 230);
+                    ctx.font = '22px sans-serif';
+                    ctx.fillText('点击屏幕 或 按空格键重新开始', 450, 290);
+                }
+            } catch (err) {
+                // 静默捕获所有渲染异常 自动恢复游戏循环 不会中断
+                console.log('游戏自动容错恢复', err);
+            }
+            requestAnimationFrame(gameLoop);
+        }
+        // 页面加载完成后再启动游戏 避免DOM未加载完成的报错
+        window.addEventListener('load', function() {
+            gameLoop();
+        });
+    </script>
+</body>
+</html>
